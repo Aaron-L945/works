@@ -1,0 +1,283 @@
+#!/usr/bin/env python
+import sys
+import getopt
+import MySQLdb
+import ConfigParser
+
+router_id = None
+router_name = None
+vrouters = False 
+#MySQLdb Configure paths
+db_conf_path = "/etc/neutron/neutron.conf"
+
+help_str = """
+command:
+
+getNFV --router_id id or id1,id2,id3....
+
+getNFV --router_name name or name1,name2,name3....
+
+getNFV --all
+
+"""
+
+
+def readDBConf():
+    try:
+        cf = ConfigParser.ConfigParser()
+        filename = db_conf_path
+        cf.read(filename)
+        connection = cf.get("database", "connection")
+
+        db_url = connection.split("//")
+        db_user = db_url[1].split(":")[0]
+        db_passwd = db_url[1].split(":")[1].split("@")[0]
+        db_ip = db_url[1].split(":")[1].split("@")[1].split("/")[0]
+        db_name = db_url[1].split("/")[1]
+
+        res_dict = {}
+        res_dict["db_user"] = db_user
+        res_dict["db_passwd"] = db_passwd
+        res_dict["db_name"] = db_name
+        res_dict["db_ip"] = db_ip
+
+        return res_dict
+    except Exception as e:
+        print e
+        return
+
+
+class CustomOpDB():
+    def __init__(self):
+        r = readDBConf()
+        if r:
+            self.host = r.get("db_ip")
+            self.port = 3306
+            self.user = r.get("db_user")
+            self.passwd = r.get("db_passwd")
+            self.db = r.get("db_name")
+            self.charset = "utf8"
+            try:
+                self.db = MySQLdb.connect(
+                    host=self.host,
+                    port=self.port,
+                    user=self.user,
+                    passwd=self.passwd,
+                    db=self.db,
+                    charset=self.charset)
+            except Exception as e:
+                print e
+        else:
+            return None
+
+    def execute_sql(self, sql):
+        cursor = self.db.cursor()
+
+        try:
+            cursor.execute(sql)
+            return cursor
+        except Exception as e:
+            print e
+            return
+
+    def query_all(self, sql):
+        cursor = self.db.cursor()
+
+        try:
+            cursor.execute(sql)
+            return cursor.fetchall()
+        except Exception as e:
+            print e
+            return
+
+    def get_nfv_vrouter_from_mysql(self,router_id):
+	if router_id:
+            sql = "select *  from nfv_vrouters where neutron_id='%s'" % router_id 
+            res = self.query_all(sql)
+            if res:
+                return res
+            return None,"Not find router_id %s" % router_id
+
+    def get_router_id(self,router_name):
+	sql = "select id from routers where name='%s'" % router_name    
+        res = self.query_all(sql)
+	try:
+	    res = res[0]
+            if res:
+                return res
+            return
+	except:
+	    return None,"Not find router_name %s" % router_name
+
+    def get_nfv_vrouters(self):
+        sql = "select *  from nfv_vrouters" 
+        res = self.query_all(sql)
+        if res:
+            return res
+        return
+
+    def get_router_name(self,router_id):
+	sql = "select name from routers where id='%s'" % router_id
+        res = self.query_all(sql)
+	try:
+	    res = res[0]
+            if res:
+                return res
+            return
+	except:
+	    return None,"Not find router_name %s" % router_name
+
+    def close_db(self):
+	self.db.close()
+	
+
+def get_router_info(router_names,router_ids,vrouters):
+    custom = CustomOpDB()
+    if router_ids:
+	if router_ids.find(",") == -1:
+            result = custom.get_nfv_vrouter_from_mysql(router_ids)
+            if result[0]:
+                return result
+	    else:
+	        print result[1]
+                print "The Router has no nfv service(/natgateway/vpn/firewall),no record in table nfv_vrouters" + "\n" 
+                sys.exit(1)
+	else:
+	    router_info_list = []
+	    for router_id in router_ids.split(","):
+                result = custom.get_nfv_vrouter_from_mysql(router_id)
+		if result[0]:
+               	    router_info_list.append(custom.get_nfv_vrouter_from_mysql(router_id))
+	        else:
+	            print result[1]
+	    return router_info_list
+		
+    elif router_names:
+	if router_names.find(",") == -1:
+            result = custom.get_router_id(router_names)
+            if result[0]:
+	        vrouter_info = custom.get_nfv_vrouter_from_mysql(result)
+	        return vrouter_info
+	    else:
+	        print result[1]
+                print "The Router has no nfv service(/natgateway/vpn/firewall),no record in table nfv_vrouters" + "\n" 
+                sys.exit(1)
+	else:
+	    router_ids = []
+	    router_info_list = []
+	    for router_name in router_names.split(","):
+		router_ids.append(custom.get_router_id(router_name))
+	    if router_ids:
+		for router_id in router_ids:
+		    if router_id[0]:
+		    	router_info_list.append(custom.get_nfv_vrouter_from_mysql(router_id))
+		    else:
+			print router_id[1]
+                        print "The Router has no nfv service(/natgateway/vpn/firewall),no record in table nfv_vrouters" + "\n" 
+                        
+	    else:
+                print "The Router has no nfv service(/natgateway/vpn/firewall),no record in table nfv_vrouters" + "\n" 
+                sys.exit(1)
+	    return router_info_list
+
+    elif vrouters:
+	result = custom.get_nfv_vrouters()
+	if result:
+	    return result 
+	else:
+            print "The Router has no nfv service(/natgateway/vpn/firewall),no record in table nfv_vrouters" + "\n" 
+            sys.exit(1)
+
+
+def get_single_max_value(data):
+    keys = ["node1","node2","vip","vrsg_id","vlan","neutron_id","nfv_type"]
+    values_len = []
+    values = []
+    for key in keys:
+        values_len.append(max([len(str(item)) for item in data[key]]))
+        values.append([str(item) for item in data[key]])
+    max_dict = dict(zip(keys,values_len))
+    return max_dict,values 
+
+
+def format_print(data):
+    keys = ["node1","node2","vip","vrsg_id","vlan","neutron_id","nfv_type"]
+    title_print(data)
+    max_dict,values = get_single_max_value(data)
+    node1,node2,vip,vrsg_id,vlan,neutron_id,nfv_type = values
+    for nfv_info in zip(node1,node2,vip,vrsg_id,vlan,neutron_id,nfv_type):
+	if max_dict["nfv_type"] < len("nfv_type"):
+	    max_dict["nfv_type"] = len("nfv_type")
+        print "|%s|%s|%s|%s|%s|%s|%s|"%(nfv_info[0].center(max_dict["node1"]+2, " "),nfv_info[1].center(max_dict["node2"]+2," "),nfv_info[2].center(max_dict["vip"]+2," "),nfv_info[3].center(max_dict["vrsg_id"]+2," "),nfv_info[4].center(max_dict["vlan"]+2," "),nfv_info[5].center(max_dict["neutron_id"]+2," "),nfv_info[6].center(max_dict["nfv_type"]+2," "))
+
+
+def title_print(data):
+    max_dict = get_single_max_value(data)[0]
+    if max_dict["nfv_type"] < len("nfv_type"):
+        max_dict["nfv_type"] = len("nfv_type")
+    print "|"+"node1".center(max_dict["node1"]+2) +  "|"+"node2".center(max_dict["node2"]+2) + "|"+"vip".center(max_dict["vip"]+2) +  "|"+"vrsg_id".center(max_dict["vrsg_id"]+2) +  "|"+"vlan".center(max_dict["vlan"]+2) +  "|"+"neutron_id".center(max_dict["neutron_id"]+2) +  "|"+"nfv_type".center(max_dict["nfv_type"]+2) + "|" 
+    
+
+if __name__ == '__main__':
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "nseh", ["router_id=", "router_name=", "all","help"])
+    except getopt.GetoptError, err:
+        print str(err)
+        print help_str
+        sys.exit(2)
+
+    if len(opts) == 0:
+        print help_str
+        sys.exit(2)
+
+    for opt, arg in opts:
+        if opt in "--router_id":
+	    router_id = arg
+	elif opt in "--router_name":
+	    router_name = arg
+	elif opt in "--all":
+	    vrouters = True	    
+	elif opt in "--help" or "-h":
+	    print help_str
+	    sys.exit(2)
+    
+    router_info = get_router_info(router_name,router_id,vrouters)
+    custom = CustomOpDB()
+    num = 0
+    vrouter_dict = {"node1":[],"node2":[],"vip":[],"vrsg_id":[],"vlan":[],"neutron_id":[],"nfv_type":[]}
+    if type(router_info) is list:
+        for router in router_info:
+	    if router[0]:
+	        for nfv_router in router:
+		    if nfv_router[0]:
+			vrouter_dict["node1"].append(nfv_router[0])
+			vrouter_dict["node2"].append(nfv_router[1])
+			vrouter_dict["vip"].append(nfv_router[2])
+			vrouter_dict["vrsg_id"].append(nfv_router[3])
+			vrouter_dict["vlan"].append(nfv_router[4])
+			vrouter_dict["neutron_id"].append(nfv_router[5])
+			vrouter_dict["nfv_type"].append(nfv_router[6])
+	        num += 1
+	    else:
+		router_id = router[1].split(" ")[-1]
+	        print "Not find router_name %s " % custom.get_router_name(router_id) + "\n"	
+		print "The Router has no nfv service(/natgateway/vpn/firewall),no record in table nfv_vrouters" + "\n"
+	format_print(vrouter_dict)
+    elif type(router_info) is tuple:
+	for nfv_router in router_info:
+	    if router_info[0]:
+		vrouter_dict["node1"].append(nfv_router[0])
+		vrouter_dict["node2"].append(nfv_router[1])
+		vrouter_dict["vip"].append(nfv_router[2])
+		vrouter_dict["vrsg_id"].append(nfv_router[3])
+		vrouter_dict["vlan"].append(nfv_router[4])
+		vrouter_dict["neutron_id"].append(nfv_router[5])
+		vrouter_dict["nfv_type"].append(nfv_router[6])
+	    else:
+		print "The Router has no nfv service(/natgateway/vpn/firewall),no record in table nfv_vrouters" + "\n"
+		sys.exit(1)
+	    num += 1
+	format_print(vrouter_dict)
+    custom.close_db()
+    print ""
+    print "%s rows in set " % str(num)

@@ -1,0 +1,395 @@
+#!/usr/bin/env python
+from __future__ import with_statement
+from oslo_utils import importutils
+import sys
+import os
+import getopt
+import multiprocessing
+import json
+from oslo_serialization import jsonutils
+import subprocess
+get_fip_cmd = "nova list | grep lxy | awk '{ print $13}'"
+get_uuid_cmd = "nova list | grep lxy | awk '{ print $2}'"
+
+fip_list= []
+vyatta_password = "vyatta"
+nfv_list = []
+nfv_password = 'P1a2s30rd@yro'
+bside = []
+aside = []
+dict_vlan = {}
+help_str = """NFV VYOS Scripts execute shell commands on NFV nodes  
+usage: python run_ssh_cmd.py [ -c | --command | --side | --vlan ]
+Commands:
+
+sshCmd --command "ls -l" --side all
+sshCmd --command "ls -l" --side aside
+sshCmd --command "ls -l" --side bside
+
+sshCmd --command "ls -l" --vlan 900
+sshCmd --command "ls -l" --vlan 900 --side bside
+sshCmd --command "ls -l" --vlan 900 --side aside
+sshCmd --command "ls -l" --nfv lb_nfv --vlan 900 --side aside
+sshCmd --command "ls -l" --nfv ng_nfv,lb_nfv --vlan 900 --side aside
+
+./sshCmd --genFipList
+./sshCmd --genUuidList
+./sshCmd --vyatta fip --command "ip a"
+./sshCmd --vyatta fip1,fip2,fip3 --command "ip a"
+
+"""
+try:
+    import pexpect
+except ImportError:
+    print """
+         You must install pexpect module
+    """
+    sys.exit(1)
+
+class Server(object):
+   
+
+    """"""
+
+    def __init__(self, host, user_name, password):
+        self.host = host
+        self.user_name = user_name
+        self.password = password
+
+    def __str__(self):
+        """Tostring."""
+        return self.host
+
+
+class JsshProcess(object):
+
+    """Class that implements ssh to the KVM servers ."""
+
+    def __init__(self, server, cmd, verbose):
+        """Constructor."""
+        self.server = server
+        self.cmd = cmd
+        self.verbose = verbose
+
+    def __ssh_failed(self, child):
+        print 'ERROR!'
+        print 'SSH could not login. Here is what SSH said:'
+        print child.before, child.after
+        return child.before
+
+    def __ssh_send_password(self, child):
+        child.sendline(self.server.password)
+        index = child.expect(pattern=[pexpect.TIMEOUT, 'Permission denied.*', pexpect.EOF], timeout=400)
+        if index == 0:
+            return False, self.__ssh_failed(child)
+        elif index == 1:
+            print "Incorrect password on the server %s" % (self.server.host)
+            return False, "Incorrect password on the server %s" % (self.server.host)
+        else:
+            return True, child.before
+
+    def __ssh_send_cli(self, cli):
+        child = pexpect.spawn(cli)
+        # child.logfile_send = sys.stdout
+        index = child.expect(pattern=[".*ssword:", pexpect.TIMEOUT, pexpect.EOF], timeout=400)
+        if index == 0:
+            success, result = self.__ssh_send_password(child)
+        elif index == 1:
+            return False, self.__ssh_failed(child)
+        else:
+            success = True
+            result = child.before
+        return success, result
+
+    def run_ssh(self, cmd):
+        """Run ssh command."""
+        cli = self.server.user_name + "@" + self.server.host + " " + cmd
+        cli = "ssh -o StrictHostKeyChecking=no " + cli
+        if self.verbose:
+            print cli
+        success, result = self.__ssh_send_cli(cli)
+
+        if self.verbose:
+            print "Runing command %s on server %s with result %s." % (cmd, self.server, result)
+	    with open("/home/lxy/flows_list.txt","a") as f:
+		f.write(result)
+
+        return result
+
+    def run_scp(self, filename, path):
+        """Run scp command."""
+        dst = self.server.user_name + "@" + self.server.host + ":" + path
+        cli = "scp -o StrictHostKeyChecking=no " + filename + " " + dst
+        if self.verbose:
+            print cli
+
+        success, result = self.__ssh_send_cli(cli)
+        if self.verbose:
+            print result
+
+        return result
+
+def worker(func, server, command, queue):
+    """Multiprocessing worker."""
+    result, error_message = func(server, command)
+
+    queue.put(str(result) + "##!!" + server.host + " " + error_message)
+
+
+def collector(number_of_process, queue):
+    """Multiprocessing result collector."""
+    failed_servers = []
+    for i in range(number_of_process):
+        result = queue.get().split('##!!')
+        if(result[0] == 'False'):
+            failed_servers.append(result[1])
+
+    for server in failed_servers:
+        print "Execute command failed on server %s" % (server)
+
+    #with open('failed_nfvs.txt', 'w') as f:
+    #    f.write('\n'.join(str(server)[:] for server in failed_servers))
+
+    #f.close()
+
+def print_help():
+    """Print help."""
+    print help_str
+
+class Upgrade_nfv():
+    def __init__(self,verbose):
+        self.verbose = verbose
+
+    def nfv_servers(self):
+        servers = []
+        for nfv in nfv_list:
+            server = Server(nfv,'vyos',nfv_password)
+            servers.append(server)
+        return servers
+
+
+    def run_ssh_cmd(self,server,cmds):
+        if len(cmds) == 1:
+            p = JsshProcess(server, "", self.verbose)
+            p.run_ssh(cmds[0])
+            return True, ""
+	else:
+	    record = []
+	    for cmd in cmds:
+                p = JsshProcess(server, "", self.verbose)
+		worker_process = multiprocessing.Process(target=p.run_ssh,args=(cmd,))
+		record.append(worker_process)
+		worker_process.start()
+	    for worker_process in record :
+		worker_process.join()
+            return True, ""
+		
+
+def _get_nfvs_from_config(nfv_str, want_keys=[]):
+    if nfv_str is None:
+        files = ["/etc/neutron/nfv.conf"]
+    elif nfv_str.find("ng_nfv") != -1 and nfv_str.find("lb_nfv") != -1:
+        files = ["/etc/neutron/nfv.conf", "/etc/neutron/lb_nfv.conf"]
+    elif nfv_str.find("ng_nfv") != -1 and nfv_str.find("lb_nfv") == -1:
+        files = ["/etc/neutron/nfv.conf"]
+    elif nfv_str.find("ng_nfv") == -1 and nfv_str.find("lb_nfv") != -1:
+        files = ["/etc/neutron/lb_nfv.conf"]
+    else:
+        files = []
+    total_nfvs = set()
+    for file in files: 
+        if not os.path.exists(file):
+            continue
+        with open(file, 'rb') as f:
+            _res = f.read()
+        res = jsonutils.loads(_res)
+    
+        nfvs = []
+        if not res:
+            return total_nfvs
+    
+        for vrsg in res['vrsg']:
+            for nfv_node in vrsg['nfv_node']:
+                _nfv = {"vrsg_id":vrsg["vrsg_id"]}
+                for key in want_keys:
+                    _nfv[key] = nfv_node[key]
+                nfvs.append(_nfv)
+       
+        for nfv in nfvs:
+            total_nfvs.add(json.dumps(nfv,sort_keys=True))
+
+    return total_nfvs
+
+def get_nfvs_from_config(conf_file, want_keys=[]):
+    """vrsg_id default in want_keys"""
+    try:
+        return _get_nfvs_from_config(conf_file, want_keys)
+    except Exception as e:
+        raise e
+
+def gen_list(nfv_str):
+    global bside
+    global aside
+    global dict_vlan
+    tag_list = ['node1', 'node2', 'vip', 'vlan']
+    for item1 in get_nfvs_from_config(nfv_str,tag_list):
+       item=json.loads(item1)
+       bside_item = item['node1'] if item['node1'] > item['node2'] else item['node2']
+       aside_item = item['node1'] if item['node1'] <= item['node2'] else item['node2']
+       vlan_item = item['vlan']
+       bside.append(bside_item)
+       aside.append(aside_item)
+       dict_vlan[vlan_item] = [bside_item , aside_item]
+
+
+def exec_cmd(cmd):
+    result = None
+    try:
+        result = subprocess.check_output(cmd, shell=True)
+    except subprocess.CalledProcessError as e:
+        return e.returncode, result
+    return 0, result
+
+
+class Upgrade_vyatta(Upgrade_nfv):
+    def __init__(self,verbose):
+        self.verbose = verbose
+
+    def vyatta_servers(self):
+        servers = []
+        for fip in fip_list:
+            server = Server(fip,'vyatta',vyatta_password)
+            servers.append(server)
+        return servers
+
+
+def gen_fip_or_ip_list(fip_cmd):
+    base_str = ""
+    ret,result = exec_cmd(fip_cmd)
+    for i in result.split("\n"):
+	base_str += i+","
+    return base_str[:-2]
+
+def main():
+    global nfv_list
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "ncsvh", ["vyatta=","genFipList","genUuidList","command=","nfv=","side=", "vlan=", "help"])
+    except getopt.GetoptError, err:
+        print str(err)
+        print_help()
+        sys.exit(2)
+    if len(opts) == 0:
+        print_help()
+        sys.exit(2)
+    command = []
+    side = None
+    vlan = None
+    vlan_flag = None
+    nfv_input = None
+    flag = False
+    
+
+    for opt, arg in opts:
+        if opt in ("--vyatta"):
+            flag = True
+	    vyatta_input = arg
+	    #import pdb;pdb.set_trace()
+            for i in vyatta_input.split(','):
+  	        fip_list.append(i)
+        elif opt in ("--genFipList"):
+            new_str = ""
+	    print gen_fip_or_ip_list(get_fip_cmd)
+
+        elif opt in ("--genUuidList"):
+            new_str = ""
+	    print gen_fip_or_ip_list(get_uuid_cmd)
+
+        elif opt in ("--nfv"):
+            nfv_input = arg
+            gen_list(nfv_input)
+            flag = True
+           
+        elif opt in ("--command"):
+            command.append(arg)
+
+
+        elif opt in ("--side"):
+            if flag is False:
+                gen_list(nfv_input)
+                flag = True
+            side = arg
+            if side == "bside":
+                if vlan_flag is None:
+                    nfv_list = bside
+                else:
+                    nfv_list = list(set(nfv_list) & set(bside)) 
+
+            elif side == "aside":
+                if vlan_flag is None:
+                    nfv_list = aside
+                else:
+                   nfv_list = list(set(nfv_list) & set(aside))
+
+            elif side == "all":
+                if vlan_flag is None:
+                    nfv_list = bside + aside
+
+        elif opt in ("--vlan"):
+            if flag is False:
+                gen_list(nfv_input)
+                flag = True
+            vlan_flag = True
+            vlans = arg 
+            if vlans.find(",") != -1:
+                vlans = vlans.split(",") 
+            else:
+                vlans = (arg,)
+            nfv_list = []
+            for vlan in vlans:
+                if vlan not in dict_vlan:
+                    print "vlan %s did not exist!"%(vlan)
+                    continue 
+
+                if side == "bside": 
+                    nfv_list.append(dict_vlan[vlan][0]) 
+
+                elif side == "aside":
+                    nfv_list.append(dict_vlan[vlan][1])
+
+                else:
+                    nfv_list.append(dict_vlan[vlan][0]) 
+                    nfv_list.append(dict_vlan[vlan][1]) 
+            
+        elif opt in ("-h", "--help"):
+            print_help()
+            sys.exit()
+        else:
+            assert False, "unhandled option"
+
+    verbose = True
+    upgrade = Upgrade_vyatta(verbose)
+    servers = upgrade.vyatta_servers()
+    queue = multiprocessing.Queue(100)
+    record = []
+    func = upgrade.run_ssh_cmd
+    for server in servers:
+        if verbose:
+            #print "Spawn process to execute command on server %s" %  server
+            pass
+        worker_process = multiprocessing.Process(target=worker, args=(func, server, command, queue))
+        worker_process.start()
+        record.append(worker_process)
+
+    collector_process = multiprocessing.Process(target=collector, args=(len(record), queue))
+    collector_process.start()
+
+    for worker_process in record:
+        worker_process.join()
+
+    queue.close()
+
+    collector_process.join()
+
+
+if __name__ == '__main__':
+    main()
