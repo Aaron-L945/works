@@ -1,0 +1,78 @@
+1.创建控制节点虚机（xml文件定义需要管理平面interface和135平面interface）135.251.99.113:/home/tanke/VmImages
+2.创建计算节点虚机（xml文件定义需要管理平面interface和数据平面interface）
+3.关闭NetworkManager和firewalld服务、修改selinux配置及配置网卡:
+systemctl disable firewalld
+systemctl disable NetworkManager
+vi /etc/sysconfig/selinux
+# This file controls the state of SELinux on the system.
+# SELINUX= can take one of these three values:
+#     enforcing - SELinux security policy is enforced.
+#     permissive - SELinux prints warnings instead of enforcing.
+#     disabled - No SELinux policy is loaded.
+SELINUX=disabled
+# SELINUXTYPE= can take one of three two values:
+#     targeted - Targeted processes are protected,
+#     minimum - Modification of targeted policy. Only selected processes are protected. 
+#     mls - Multi Level Security protection.
+SELINUXTYPE=targeted
+
+4.配置yum源:（135.251.99.115:/var/ftp/pub/pike.repo） (控制节点和计算节点)
+编辑/etc/yum.repos.d/CentOS-Base.repo文件并添加以下内容：
+[base]
+name=CentOS-$releasever - Base
+baseurl=ftp://172.101.0.115/pub/pike.repo
+gpgcheck=0
+控制节点执行：
+yum clean all
+yum makecache
+
+5.安装rdo：(控制节点和计算节点)
+控制节点执行：
+yum install rdo-release.noarch;
+
+编辑/etc/yum/yum.repos.d/rdo-release.repo文件：
+[openstack-pike]
+name=OpenStack Pike Repository
+baseurl=ftp://172.101.0.115/pub/pike.repo
+gpgcheck=0
+
+编辑/etc/yum/yum.repos.d/rdo-qemu-ev.repo文件：
+[rdo-qemu-ev]
+name=RDO CentOS-7 - QEMU EV
+baseurl=ftp://172.101.0.115/pub/pike.repo
+gpgcheck=0
+
+6.控制节点执行：
+yum install openstack-packstack
+
+
+7.控制节点执行：
+#生成answer.txt
+packstack --gen-answer-file=./answer.txt
+
+8.控制节点编辑answer文件,只保留neutron nova 等组件并配置控制节点和计算节点ip地址
+
+
+9.控制节点执行：
+packstack --answer-file=./answer.txt
+
+
+10.修改/etc/httpd/conf.d/15-horizon_vhost.conf
+ ServerAlias 管理地址
+
+systemctl restart httpd
+ 
+11.计算节点安装libvirtd-daemon:
+yum search libvirt
+yum reinstall libvirt-client libvirt-daemon libvirt-daemon-driver-qemu
+
+
+启动libvitd服务:
+systemctl start libvirtd
+systemctl enable libvirtd
+12.安装防火墙负载均衡和vpn业务：
+yum search openstack-neutron
+yum install openstack-neutron-fwaas
+yum install openstack-neutron-lbaas
+yum install openstack-neutron-vpnaas
+13.扩容
