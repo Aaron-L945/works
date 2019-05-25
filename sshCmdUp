@@ -8,9 +8,11 @@ import multiprocessing
 import json
 from oslo_serialization import jsonutils
 import subprocess
+import re
+re_obj = "-[\s\S]*?:(\d+)"
 get_fip_cmd = "nova list | grep %s | awk '{ print $13}'"
 get_uuid_cmd = "nova list | grep %s | awk '{ print $2}'"
-
+get_vm_name = "nova list | grep %s | grep %s | awk '{ print $4 }'"
 fip_list= []
 host_list = []
 vyatta_password = "vyatta"
@@ -20,6 +22,8 @@ nfv_password = 'P1a2s30rd@yro'
 bside = []
 aside = []
 dict_vlan = {}
+User_name = [] 
+vm_uuids = []
 help_str = """
 Commands:
 
@@ -27,7 +31,7 @@ Commands:
 ./sshCmdUp --genUuidList lxy
 ./sshCmdUp --vyatta fip --command "ip a"
 ./sshCmdUp --vyatta fip1,fip2,fip3 --command "ip a"
-./sshCmdUp --host ip --command "vm_id,vm_id"
+./sshCmdUp --host ip --command "vm_id,vm_id" --userName lxy
 """
 
 try:
@@ -100,8 +104,23 @@ class JsshProcess(object):
         if self.verbose:
             print cli
         success, result = self.__ssh_send_cli(cli)
+        vnc_ports = []
+        vm_names = []
+        #import pdb;pdb.set_trace()
+        if host_list:
+            pattern = re.compile(re_obj)
+            for item in str(result).split("\n"):
+                result = re.findall(pattern,item)
+                if result:
+                    vnc_ports.append(result[0])
+            for vm_uuid in vm_uuids[0].split(","):
+                ret,result = exec_cmd(get_vm_name%(User_name[0],vm_uuid))
+                if result:
+                    vm_names.append(result)
+            for vm_name,vnc_port in zip(vm_names,vnc_ports):
+                print vm_name.strip() +" : "+ vnc_port
 
-        if self.verbose:
+        elif self.verbose:
             print "Runing command %s on server %s with result %s." % (cmd, self.server, result)
 	    with open("/home/lxy/flows_list.txt","a") as f:
 		f.write(result)
@@ -161,6 +180,7 @@ class Upgrade_nfv():
 
 
     def run_ssh_cmd(self,server,cmds):
+        #import pdb;pdb.set_trace()
         if len(cmds) == 1:
             p = JsshProcess(server, "", self.verbose)
             p.run_ssh(cmds[0])
@@ -274,6 +294,7 @@ def gen_fip_or_ip_list(fip_cmd):
 
 
 def start_process(command,verbose,func,servers):
+    #import pdb;pdb.set_trace()
     record = []
     queue = multiprocessing.Queue(100)
     for server in servers:
@@ -297,7 +318,7 @@ def start_process(command,verbose,func,servers):
 def main():
     global nfv_list
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "ncsvh", ["vyatta=","host=","genFipList=","genUuidList=","command=","nfv=","side=", "vlan=", "help"])
+        opts, args = getopt.getopt(sys.argv[1:], "ncsvh", ["vyatta=","host=","genFipList=","genUuidList=","command=","userName=","nfv=","side=", "vlan=", "help"])
     except getopt.GetoptError, err:
         print str(err)
         print_help()
@@ -323,13 +344,18 @@ def main():
         elif opt in ("--genFipList"):
             #import pdb;pdb.set_trace()
             flag = True
-            tenant_name = arg
-	    print gen_fip_or_ip_list(get_fip_cmd%tenant_name)
+            user_name = arg
+	    print gen_fip_or_ip_list(get_fip_cmd%user_name)
 
         elif opt in ("--genUuidList"):
             flag = True
-            tenant_name = arg
-	    print gen_fip_or_ip_list(get_uuid_cmd%tenant_name)
+            user_name = arg
+	    print gen_fip_or_ip_list(get_uuid_cmd%user_name)
+     
+        elif opt in ("--userName"):
+            flag = True
+            User_name.append(arg)
+            
 
         elif opt in ("--nfv"):
             nfv_input = arg
@@ -400,16 +426,18 @@ def main():
 
     verbose = True
     upgrade = Upgrade_vyatta(verbose)
+    vm_uuids.extend(command)
     #import pdb;pdb.set_trace()
     if fip_list:
         servers = upgrade.vyatta_servers()
+    elif nfv_list:
+        upgrade = Upgrade_nfv(verbose)
+        servers = upgrade.nfv_servers()
     elif host_list:
         servers = upgrade.host_servers()
         command.append("python /home/lxy/find_vm_vnc.py --uuid " + command.pop())
-    queue = multiprocessing.Queue(100)
-    record = []
     func = upgrade.run_ssh_cmd
-    if fip_list or host_list:
+    if fip_list or host_list or nfv_list:
         start_process(command,verbose,func,servers)
 
 
